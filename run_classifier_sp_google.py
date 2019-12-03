@@ -35,34 +35,47 @@ flags = tf.flags
 
 FLAGS = flags.FLAGS
 
+# tiny, small
+model_type = "tiny"
+
 ## Required parameters
 flags.DEFINE_string(
-    "data_dir", None,
+    "model_dir", "../pretrained_models/albert_{}_zh_google/".format(model_type),
     "The input data dir. Should contain the .tsv files (or other data files) "
     "for the task.")
 
 flags.DEFINE_string(
-    "albert_config_file", None,
+    "data_dir", "data/",
+    "The input data dir. Should contain the .tsv files (or other data files) "
+    "for the task.")
+
+flags.DEFINE_string(
+    "label_file", FLAGS.data_dir + "labels.txt",
+    "The input label file. Should contain the labels "
+    "for the task.")
+
+flags.DEFINE_string(
+    "albert_config_file", FLAGS.model_dir + "albert_config_{}_google.json".format(model_type),
     "The config json file corresponding to the pre-trained ALBERT model. "
     "This specifies the model architecture.")
 
-flags.DEFINE_string("task_name", None, "The name of the task to train.")
+flags.DEFINE_string("task_name", "ss", "The name of the task to train.")
 
 flags.DEFINE_string(
-    "vocab_file", None,
+    "vocab_file", FLAGS.model_dir + "vocab.txt",
     "The vocabulary file that the ALBERT model was trained on.")
 
 flags.DEFINE_string("spm_model_file", None,
                     "The model file for sentence piece tokenization.")
 
 flags.DEFINE_string(
-    "output_dir", None,
+    "output_dir", "output",
     "The output directory where the model checkpoints will be written.")
 
 ## Other parameters
 
 flags.DEFINE_string(
-    "init_checkpoint", None,
+    "init_checkpoint", FLAGS.model_dir + "albert_model.ckpt",
     "Initial checkpoint (usually from a pre-trained ALBERT model).")
 
 flags.DEFINE_bool(
@@ -79,12 +92,12 @@ flags.DEFINE_integer(
     "Sequences longer than this will be truncated, and sequences shorter "
     "than this will be padded.")
 
-flags.DEFINE_bool("do_train", False, "Whether to run training.")
+flags.DEFINE_bool("do_train", True, "Whether to run training.")
 
-flags.DEFINE_bool("do_eval", False, "Whether to run eval on the dev set.")
+flags.DEFINE_bool("do_eval", True, "Whether to run eval on the dev set.")
 
 flags.DEFINE_bool(
-    "do_predict", False,
+    "do_predict", True,
     "Whether to run the model in inference mode on the test set.")
 
 flags.DEFINE_integer("train_batch_size", 32, "Total batch size for training.")
@@ -106,7 +119,7 @@ flags.DEFINE_float(
 flags.DEFINE_integer("save_checkpoints_steps", 1000,
                      "How often to save the model checkpoint.")
 
-flags.DEFINE_integer("iterations_per_loop", 1000,
+flags.DEFINE_integer("iterations_per_loop", 100,
                      "How many steps to make in each estimator call.")
 
 flags.DEFINE_bool("use_tpu", False, "Whether to use TPU or GPU/CPU.")
@@ -426,6 +439,48 @@ class ColaProcessor(DataProcessor):
         text_a = tokenization.preprocess_text(
             line[3], lower=FLAGS.do_lower_case)
         label = tokenization.preprocess_text(line[1])
+      examples.append(
+          InputExample(guid=guid, text_a=text_a, text_b=None, label=label))
+    return examples
+
+
+# 自定义数据处理函数
+class SsProcessor(DataProcessor):
+  """Processor for the SpeechService data set (GLUE version)."""
+
+  def get_train_examples(self, data_dir):
+    """See base class."""
+    return self._create_examples(
+        self._read_tsv(os.path.join(data_dir, "train.tsv")), "train")
+
+  def get_dev_examples(self, data_dir):
+    """See base class."""
+    return self._create_examples(
+        self._read_tsv(os.path.join(data_dir, "dev.tsv")), "dev")
+
+  def get_test_examples(self, data_dir):
+    """See base class."""
+    return self._create_examples(
+        self._read_tsv(os.path.join(data_dir, "test.tsv")), "test")
+
+  def get_labels(self):
+    """See base class."""
+    with open(FLAGS.label_file, encoding="utf8") as fi:
+        labels = [x.strip() for x in fi.readlines()]
+    return labels
+
+  def _create_examples(self, lines, set_type):
+    """Creates examples for the training and dev sets."""
+    examples = []
+    for (i, line) in enumerate(lines):
+      # Only the test set has a header
+      guid = "%s-%s" % (set_type, i)
+      if set_type == "test":
+        text_a = tokenization.convert_to_unicode(line[1])
+        label = "__label__unknown"
+      else:
+        text_a = tokenization.convert_to_unicode(line[1])
+        label = tokenization.convert_to_unicode(line[0])
       examples.append(
           InputExample(guid=guid, text_a=text_a, text_b=None, label=label))
     return examples
@@ -852,7 +907,8 @@ def main(_):
       "mnli": MnliProcessor,
       "mrpc": MrpcProcessor,
       "xnli": XnliProcessor,
-      "lcqmc_pair": LCQMCPairClassificationProcessor
+      "lcqmc_pair": LCQMCPairClassificationProcessor,
+      "ss": SsProcessor
 
   }
 
