@@ -1137,7 +1137,7 @@ def main(_):
           predict_id = curr_result["predictions"]
           predict_label = label_list[predict_id]
           e = timeit.default_timer()
-          print("预测耗时：{}毫秒.".format((e - s) * 1000))
+          print("预测耗时：{:.5f}秒.".format(e - s))
           print("意图识别结果：{}".format(predict_label))
 
 
