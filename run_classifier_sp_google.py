@@ -26,6 +26,7 @@ import os
 
 import six
 from six.moves import zip
+import timeit
 import tensorflow as tf
 
 import modeling_google as modeling
@@ -92,9 +93,9 @@ flags.DEFINE_integer(
     "Sequences longer than this will be truncated, and sequences shorter "
     "than this will be padded.")
 
-flags.DEFINE_bool("do_train", True, "Whether to run training.")
+flags.DEFINE_bool("do_train", False, "Whether to run training.")
 
-flags.DEFINE_bool("do_eval", True, "Whether to run eval on the dev set.")
+flags.DEFINE_bool("do_eval", False, "Whether to run eval on the dev set.")
 
 flags.DEFINE_bool(
     "do_predict", True,
@@ -1074,63 +1075,144 @@ def main(_):
     #    writer.write("%s = %s\n" % (key, str(result[key])))
 
   if FLAGS.do_predict:
-    predict_examples = processor.get_test_examples(FLAGS.data_dir)
-    num_actual_predict_examples = len(predict_examples)
-    if FLAGS.use_tpu:
-      # TPU requires a fixed batch size for all batches, therefore the number
-      # of examples must be a multiple of the batch size, or else examples
-      # will get dropped. So we pad with fake examples which are ignored
-      # later on.
-      while len(predict_examples) % FLAGS.predict_batch_size != 0:
-        predict_examples.append(PaddingInputExample())
+    def input_fn_builder_predict(features, seq_length):
+        """Creates an `input_fn` closure to be passed to TPUEstimator."""
+        def input_fn(params):
+            """The actual input function."""
+            batch_size = 1
 
-    predict_file = os.path.join(FLAGS.output_dir, "predict.tf_record")
-    file_based_convert_examples_to_features(predict_examples, label_list,
-                                            FLAGS.max_seq_length, tokenizer,
-                                            predict_file)
+            # This is for demo purposes and does NOT scale to large data sets. We do
+            # not use Dataset.from_generator() because that uses tf.py_func which is
+            # not TPU compatible. The right way to load data is with TFRecordReader.
+            d = tf.data.Dataset.from_generator(features,
+                                               output_types={'input_ids': tf.int32,
+                                                              'input_mask': tf.int32,
+                                                              'segment_ids': tf.int32,
+                                                              'label_ids': tf.int32},
+                                               output_shapes={
+                                                 'label_ids': (None),
+                                                 'input_ids': (seq_length),
+                                                 'input_mask': (seq_length),
+                                                 'segment_ids': (seq_length)})
+            d = d.batch(batch_size=batch_size)
+            iterator = d.make_one_shot_iterator()
+            element = iterator.get_next()
+            return element
 
-    tf.logging.info("***** Running prediction*****")
-    tf.logging.info("  Num examples = %d (%d actual, %d padding)",
-                    len(predict_examples), num_actual_predict_examples,
-                    len(predict_examples) - num_actual_predict_examples)
-    tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
+        return input_fn
 
-    predict_drop_remainder = True if FLAGS.use_tpu else False
-    predict_input_fn = file_based_input_fn_builder(
-        input_file=predict_file,
-        seq_length=FLAGS.max_seq_length,
-        is_training=False,
-        drop_remainder=predict_drop_remainder)
+    class FastPredict:
+      def __init__(self, estimator, input_fn_builder):
+          self.estimator = estimator
+          self.closed = False
+          self.result = None
+          self.first_run = True
+          self.sentence = None
+          self.input_fn_builder = input_fn_builder
 
-    result = estimator.predict(input_fn=predict_input_fn)
+      def _get_feature(self, text):
+          example = InputExample("test", text, None, "__label__unknown")
+          feature = convert_single_example(0, example, label_list, FLAGS.max_seq_length, tokenizer)
+          rt_feature = {
+            'input_ids': feature.input_ids,
+             'input_mask': feature.input_mask,
+             'segment_ids': feature.segment_ids,
+             'label_ids': feature.label_id
+          }
+          return rt_feature
 
-    output_predict_file = os.path.join(FLAGS.output_dir, "test_results.tsv")
-    output_submit_file = os.path.join(FLAGS.output_dir, "submit_results.tsv")
-    with tf.gfile.GFile(output_predict_file, "w") as pred_writer,\
-        tf.gfile.GFile(output_submit_file, "w") as sub_writer:
-      num_written_lines = 0
-      tf.logging.info("***** Predict results *****")
-      for (i, (example, prediction)) in\
-          enumerate(zip(predict_examples, result)):
-        probabilities = prediction["probabilities"]
-        if i >= num_actual_predict_examples:
-          break
-        output_line = "\t".join(
-            str(class_probability)
-            for class_probability in probabilities) + "\n"
-        pred_writer.write(output_line)
+      def _create_generator(self):
+          """构建生成器"""
+          while not self.closed:
+            yield self._get_feature(self.sentence)
 
-        actual_label = label_list[int(prediction["predictions"])]
-        sub_writer.write(
-            six.ensure_str(example.guid) + "\t" + actual_label + "\n")
-        num_written_lines += 1
-    assert num_written_lines == num_actual_predict_examples
+      def predict(self, sentence):
+          s = timeit.default_timer()
+          self.sentence = sentence
+          if self.first_run:
+            self.result = self.estimator.predict(input_fn=self.input_fn_builder(features=self._create_generator,
+                                                                                seq_length=FLAGS.max_seq_length))
+            self.first_run = False
+          curr_result = next(self.result)
+          predict_id = curr_result["predictions"]
+          predict_label = label_list[predict_id]
+          e = timeit.default_timer()
+          print("预测耗时：{}毫秒.".format((e - s) * 1000))
+          print("意图识别结果：{}".format(predict_label))
+
+
+      def close(self):
+          self.closed = True
+    #
+    fast_predict = FastPredict(estimator=estimator, input_fn_builder=input_fn_builder_predict)
+    while True:
+      input_sentence = input("请输入：")
+      if "q" == input_sentence:
+        break
+      fast_predict.predict(input_sentence)
+    fast_predict.close()
+
+    # predict_examples = processor.get_test_examples(FLAGS.data_dir)
+    # num_actual_predict_examples = len(predict_examples)
+    # if FLAGS.use_tpu:
+    #   # TPU requires a fixed batch size for all batches, therefore the number
+    #   # of examples must be a multiple of the batch size, or else examples
+    #   # will get dropped. So we pad with fake examples which are ignored
+    #   # later on.
+    #   while len(predict_examples) % FLAGS.predict_batch_size != 0:
+    #     predict_examples.append(PaddingInputExample())
+    #
+    # predict_file = os.path.join(FLAGS.output_dir, "predict.tf_record")
+    # file_based_convert_examples_to_features(predict_examples, label_list,
+    #                                         FLAGS.max_seq_length, tokenizer,
+    #                                         predict_file)
+    #
+    # tf.logging.info("***** Running prediction*****")
+    # tf.logging.info("  Num examples = %d (%d actual, %d padding)",
+    #                 len(predict_examples), num_actual_predict_examples,
+    #                 len(predict_examples) - num_actual_predict_examples)
+    # tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
+    #
+    # predict_drop_remainder = True if FLAGS.use_tpu else False
+    # predict_input_fn = file_based_input_fn_builder(
+    #     input_file=predict_file,
+    #     seq_length=FLAGS.max_seq_length,
+    #     is_training=False,
+    #     drop_remainder=predict_drop_remainder)
+    #
+    # result = estimator.predict(input_fn=predict_input_fn)
+    #
+    # output_predict_file = os.path.join(FLAGS.output_dir, "test_results.tsv")
+    # output_submit_file = os.path.join(FLAGS.output_dir, "submit_results.tsv")
+    # with tf.gfile.GFile(output_predict_file, "w") as pred_writer,\
+    #     tf.gfile.GFile(output_submit_file, "w") as sub_writer:
+    #   num_written_lines = 0
+    #   tf.logging.info("***** Predict results *****")
+    #   for (i, (example, prediction)) in\
+    #       enumerate(zip(predict_examples, result)):
+    #     probabilities = prediction["probabilities"]
+    #     if i >= num_actual_predict_examples:
+    #       break
+    #     output_line = "\t".join(
+    #         str(class_probability)
+    #         for class_probability in probabilities) + "\n"
+    #     pred_writer.write(output_line)
+    #
+    #     actual_label = label_list[int(prediction["predictions"])]
+    #     sub_writer.write(
+    #         six.ensure_str(example.guid) + "\t" + actual_label + "\n")
+    #     num_written_lines += 1
+    # assert num_written_lines == num_actual_predict_examples
 
 
 if __name__ == "__main__":
+  import timeit
   flags.mark_flag_as_required("data_dir")
   flags.mark_flag_as_required("task_name")
   flags.mark_flag_as_required("vocab_file")
   flags.mark_flag_as_required("albert_config_file")
   flags.mark_flag_as_required("output_dir")
+  s = timeit.default_timer()
   tf.app.run()
+  e = timeit.default_timer()
+  print("time cost: {} hours.".format((e-s)/3600))
